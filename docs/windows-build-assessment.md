@@ -11,14 +11,14 @@ MSYS2 UCRT64, autotools, GCC, libyaml, OpenSSL, gensio, and Inno Setup Compiler 
 
 ## Support Summary
 
-| Item | Assessment |
-| --- | --- |
-| Windows build feasibility | Feasible, but requires MSYS2 UCRT64/MINGW64 |
-| Native MSVC build | Not recommended; the project does not provide CMake, a Visual Studio solution, or an MSVC-compatible build flow |
-| Windows runtime form | Standard Windows console executable, using `etc/ser2net` and `share/ser2net` relative to the exe |
-| Installer | Inno Setup script `ser2net.iss` is available |
-| Test coverage | Upstream tests are mainly Linux-only; Windows needs separate smoke/integration tests |
-| Main risks | gensio Windows build, complete DLL packaging, serialdev/COM port behavior validation |
+| Item                      | Assessment                                                                                                      |
+|---------------------------|-----------------------------------------------------------------------------------------------------------------|
+| Windows build feasibility | Feasible, but requires MSYS2 UCRT64/MINGW64                                                                     |
+| Native MSVC build         | Not recommended; the project does not provide CMake, a Visual Studio solution, or an MSVC-compatible build flow |
+| Windows runtime form      | Standard Windows console executable, using `etc/ser2net` and `share/ser2net` relative to the exe                |
+| Installer                 | Inno Setup script `ser2net.iss` is available                                                                    |
+| Test coverage             | Upstream tests are mainly Linux-only; Windows needs separate smoke/integration tests                            |
+| Main risks                | gensio Windows build, complete DLL packaging, serialdev/COM port behavior validation                            |
 
 ## Evidence of Windows Support in the Project
 

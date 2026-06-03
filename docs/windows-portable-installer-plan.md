@@ -13,13 +13,13 @@ The first version does not pursue a fully static executable and does not install
 
 ## Deliverables
 
-| Deliverable | Description |
-| --- | --- |
-| Portable folder | A `Ser2Net/` directory that can be copied directly to another Windows machine and run |
-| Inno Setup installer | `Ser2Net-<version>-win64.exe` for colleagues to install |
-| DLL inventory | Records each bundled DLL and its purpose/source |
-| Smoke test record | Proves that the installed package can start and accept a TCP connection |
-| Updated `.iss` | Reproducible Inno Setup script for generating the installer |
+| Deliverable          | Description                                                                           |
+|----------------------|---------------------------------------------------------------------------------------|
+| Portable folder      | A `Ser2Net/` directory that can be copied directly to another Windows machine and run |
+| Inno Setup installer | `Ser2Net-<version>-win64.exe` for colleagues to install                               |
+| DLL inventory        | Records each bundled DLL and its purpose/source                                       |
+| Smoke test record    | Proves that the installed package can start and accept a TCP connection               |
+| Updated `.iss`       | Reproducible Inno Setup script for generating the installer                           |
 
 ## Recommended Directory Layout
 
@@ -234,24 +234,24 @@ Acceptance:
 
 ## Milestones
 
-| Milestone | Completion condition |
-| --- | --- |
-| M1: Toolchain usable | MSYS2 UCRT64, libyaml, and gensio build environment are available |
-| M2: ser2net builds | `ser2net.exe` is produced and can start on the build host |
-| M3: Portable folder runs | `dist/Ser2Net/` runs without MSYS2 in PATH |
-| M4: Installer installs | Inno Setup produces an installer that installs to `{app}` |
-| M5: Clean machine validation passes | Smoke test passes on Windows without MSYS2 |
+| Milestone                           | Completion condition                                              |
+|-------------------------------------|-------------------------------------------------------------------|
+| M1: Toolchain usable                | MSYS2 UCRT64, libyaml, and gensio build environment are available |
+| M2: ser2net builds                  | `ser2net.exe` is produced and can start on the build host         |
+| M3: Portable folder runs            | `dist/Ser2Net/` runs without MSYS2 in PATH                        |
+| M4: Installer installs              | Inno Setup produces an installer that installs to `{app}`         |
+| M5: Clean machine validation passes | Smoke test passes on Windows without MSYS2                        |
 
 ## Risks and Mitigations
 
-| Risk | Impact | Mitigation |
-| --- | --- | --- |
-| Missing DLL in package | Colleague machine cannot start the program | Build a DLL inventory with `ldd` and validate on a clean VM |
-| Too many gensio feature dependencies | Installer grows and DLL list becomes complex | Keep only required functionality in the first version, then add SSL/mDNS/IPMI later |
-| COM port behavior differs from Linux serialdev | Real device connection fails | Run smoke tests with a physical or virtual COM port |
-| PATH modification pollutes system state | Poor install/uninstall experience | Check for duplicates before adding PATH and verify uninstall cleanup |
-| Windows Service added too early | More permission, account, and maintenance complexity | First version remains a console app; service support moves to phase two |
-| Fully static linking is not feasible | Delivery is delayed | Exclude it from the first version and use a portable DLL bundle |
+| Risk                                           | Impact                                               | Mitigation                                                                          |
+|------------------------------------------------|------------------------------------------------------|-------------------------------------------------------------------------------------|
+| Missing DLL in package                         | Colleague machine cannot start the program           | Build a DLL inventory with `ldd` and validate on a clean VM                         |
+| Too many gensio feature dependencies           | Installer grows and DLL list becomes complex         | Keep only required functionality in the first version, then add SSL/mDNS/IPMI later |
+| COM port behavior differs from Linux serialdev | Real device connection fails                         | Run smoke tests with a physical or virtual COM port                                 |
+| PATH modification pollutes system state        | Poor install/uninstall experience                    | Check for duplicates before adding PATH and verify uninstall cleanup                |
+| Windows Service added too early                | More permission, account, and maintenance complexity | First version remains a console app; service support moves to phase two             |
+| Fully static linking is not feasible           | Delivery is delayed                                  | Exclude it from the first version and use a portable DLL bundle                     |
 
 ## Out of Scope for the First Version
 
