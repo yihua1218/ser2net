@@ -56,6 +56,21 @@ jobs:
         shell: msys2 {0}
         run: bash scripts/build-windows-package.sh
 
+      - name: Validate portable folder
+        run: |
+          $required = @(
+            "dist\Ser2Net\bin\ser2net.exe",
+            "dist\Ser2Net\etc\ser2net\windows.yml",
+            "dist\Ser2Net\etc\ser2net\smoke-echo.yaml",
+            "dist\Ser2Net\docs\dll-inventory.txt"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) {
+              throw "Required package file is missing: $path"
+            }
+          }
+          Get-ChildItem dist\Ser2Net -Recurse | Select-Object FullName, Length
+
       - name: Read package version
         id: version
         run: |

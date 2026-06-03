@@ -78,4 +78,5 @@ cp "$root_dir/ser2net.8" "$dist_dir/man/man8/"
 
 "$dist_dir/bin/ser2net.exe" -v
 
+find "$dist_dir" -maxdepth 3 -type f | sort
 echo "Portable package prepared at $dist_dir"
