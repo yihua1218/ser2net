@@ -3,7 +3,9 @@
 #
 # Windows ser2net sample configuration.
 #
-# This maps Telnet-over-TCP port 3001 to COM4 at 115200 8N1.
+# This maps Telnet-over-TCP port 3001 on all IPv4 interfaces to COM4 at
+# 115200 8N1. Replace 0.0.0.0 with a specific Ethernet adapter IPv4 address if
+# you only want ser2net to listen on that adapter.
 # Use a raw TCP client instead of telnet if you change this back to tcp,3001.
 # ser2net echo is disabled by using the serialdev connector directly.
 # Do not use "connector: echo" unless you want a loopback test endpoint.
@@ -20,5 +22,5 @@
 # ending conversion.
 #
 connection: &com-test
-  accepter: telnet,tcp,3001
+  accepter: telnet,tcp,0.0.0.0,3001
   connector: serialdev,COM4,115200N81
