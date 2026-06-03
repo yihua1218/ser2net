@@ -1,0 +1,24 @@
+%YAML 1.1
+---
+#
+# Windows ser2net sample configuration.
+#
+# This maps Telnet-over-TCP port 3001 to COM4 at 115200 8N1.
+# Use a raw TCP client instead of telnet if you change this back to tcp,3001.
+# ser2net echo is disabled by using the serialdev connector directly.
+# Do not use "connector: echo" unless you want a loopback test endpoint.
+#
+# If typed characters appear twice, the terminal client may have local echo
+# enabled while the serial device is also echoing. Disable local echo in the
+# terminal program, or keep the accepter as telnet,tcp so telnet negotiation can
+# tell the client that echo is handled remotely.
+#
+# If pressing Enter creates two line breaks, configure the terminal client to
+# send only CR instead of CR+LF. Many serial consoles treat CR and LF as separate
+# newline characters, so sending both can look like a double Enter. Keep ser2net
+# as a transparent bridge unless the connected device explicitly requires line
+# ending conversion.
+#
+connection: &com-test
+  accepter: telnet,tcp,3001
+  connector: serialdev,COM4,115200N81

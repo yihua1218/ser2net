@@ -1,0 +1,98 @@
+name: Windows Package
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - win64
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build Windows package
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      GENSIO_REF: 0a00359305f211dbe844ec7eaa6962c7f1af52b1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install MSYS2 UCRT64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: minimal
+          install: >-
+            git
+            base-devel
+            autoconf
+            automake
+            libtool
+            make
+            pkgconf
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-libyaml
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build portable folder
+        shell: msys2 {0}
+        run: bash scripts/build-windows-package.sh
+
+      - name: Read package version
+        id: version
+        run: |
+          $configure = Get-Content configure.ac -Raw
+          if ($configure -notmatch 'AC_INIT\(\[ser2net\],\[(?<version>[^\]]+)\]') {
+            throw "Unable to read ser2net version from configure.ac"
+          }
+          "value=$($Matches.version)" >> $env:GITHUB_OUTPUT
+
+      - name: Build Inno Setup installer
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DMyAppVersion=${{ steps.version.outputs.value }}" ser2net.iss
+
+      - name: Build portable zip
+        run: |
+          $version = "${{ steps.version.outputs.value }}"
+          New-Item -ItemType Directory -Force dist\installer | Out-Null
+          Compress-Archive `
+            -Path dist\Ser2Net\* `
+            -DestinationPath "dist\installer\Ser2Net-$version-win64-portable.zip" `
+            -Force
+
+      - name: Upload Windows package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ser2Net-${{ steps.version.outputs.value }}-win64
+          path: |
+            dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64.exe
+            dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64-portable.zip
+            dist/Ser2Net/docs/dll-inventory.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64.exe
+            dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64-portable.zip

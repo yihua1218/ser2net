@@ -1,8 +1,18 @@
+#ifndef MyAppName
 #define MyAppName "Ser2Net"
+#endif
+#ifndef MyAppVersion
 #define MyAppVersion "4.6.7"
+#endif
+#ifndef MyAppPublisher
 #define MyAppPublisher "Ser2Net"
+#endif
+#ifndef MyAppURL
 #define MyAppURL "https://github.com/cminyard/ser2net"
+#endif
+#ifndef SourceDir
 #define SourceDir "dist\Ser2Net"
+#endif
 
 [Setup]
 AppId={{20B100EC-E722-47F4-923A-34ECABC50215}

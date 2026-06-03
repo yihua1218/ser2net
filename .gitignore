@@ -26,6 +26,8 @@ modules.*
 *.mod.c
 *.ur-safe
 ser2net
+!etc/ser2net/
+!etc/ser2net/windows.yml
 
 # Local Windows/MSYS2 build and packaging output
 /_deps/
