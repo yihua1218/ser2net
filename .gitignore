@@ -5,6 +5,9 @@ Makefile.in
 tags
 ser2net.spec
 missing
+ar-lib
+compile
+test-driver
 aclocal.m4
 libtool
 ltmain.sh
@@ -23,3 +26,12 @@ modules.*
 *.mod.c
 *.ur-safe
 ser2net
+
+# Local Windows/MSYS2 build and packaging output
+/_deps/
+/_stage/
+/build-*/
+/dist/
+
+# IDE/user-local settings
+/.vscode/
