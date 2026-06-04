@@ -38,22 +38,95 @@ ArchitecturesInstallIn64BitMode=x64compatible
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Tasks]
+Name: "installservice"; Description: "Install and start Ser2Net Windows Service"; Flags: checkedonce
+Name: "autostarttray"; Description: "Start Ser2Net Manager when Windows starts"; Flags: checkedonce
+
+[Dirs]
+Name: "{commonappdata}\Ser2Net"; Permissions: users-modify
+Name: "{commonappdata}\Ser2Net\etc"; Permissions: users-modify
+Name: "{commonappdata}\Ser2Net\etc\ser2net"; Permissions: users-modify
+Name: "{commonappdata}\Ser2Net\logs"; Permissions: users-modify
+
 [Files]
 Source: "{#SourceDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#SourceDir}\etc\*"; DestDir: "{app}\etc"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\etc\*"; DestDir: "{commonappdata}\Ser2Net\etc"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\share\*"; DestDir: "{app}\share"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#SourceDir}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "{#SourceDir}\man\*"; DestDir: "{app}\man"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\Ser2Net Command Prompt"; Filename: "{cmd}"; Parameters: "/K cd /d ""{app}\bin"""; WorkingDir: "{app}\bin"
+Name: "{group}\Ser2Net Manager"; Filename: "{app}\bin\Ser2Net.Tray.exe"; WorkingDir: "{app}\bin"
 Name: "{group}\Ser2Net Documentation"; Filename: "{app}\docs"
 Name: "{group}\{cm:ProgramOnTheWeb,{#MyAppName}}"; Filename: "{#MyAppURL}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+Name: "{commonstartup}\Ser2Net Manager"; Filename: "{app}\bin\Ser2Net.Tray.exe"; WorkingDir: "{app}\bin"; Tasks: autostarttray
+
+[Run]
+Filename: "{app}\bin\Ser2Net.Service.exe"; Parameters: "install"; Tasks: installservice; Flags: runhidden waituntilterminated
+Filename: "{app}\bin\Ser2Net.Service.exe"; Parameters: "start"; Tasks: installservice; Flags: runhidden waituntilterminated
+Filename: "{app}\bin\Ser2Net.Tray.exe"; Description: "Launch Ser2Net Manager"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{app}\bin\Ser2Net.Service.exe"; Parameters: "stop"; Flags: runhidden waituntilterminated skipifdoesntexist
+Filename: "{app}\bin\Ser2Net.Service.exe"; Parameters: "uninstall"; Flags: runhidden waituntilterminated skipifdoesntexist
 
 [Code]
 const
   EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+
+function ExecHidden(FileName: string; Params: string; var ResultCode: Integer): Boolean;
+begin
+  Result := Exec(FileName, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure TryStopService();
+var
+  ResultCode: Integer;
+begin
+  ExecHidden(ExpandConstant('{sys}\sc.exe'), 'stop Ser2Net', ResultCode);
+end;
+
+function IsServiceStopped(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := ExecHidden(
+    ExpandConstant('{cmd}'),
+    '/C sc query Ser2Net | find "STOPPED" >nul',
+    ResultCode) and (ResultCode = 0);
+end;
+
+procedure WaitForServiceStopped();
+var
+  I: Integer;
+begin
+  for I := 1 to 20 do begin
+    if IsServiceStopped() then
+      exit;
+    Sleep(500);
+  end;
+end;
+
+procedure KillProcess(ImageName: string);
+var
+  ResultCode: Integer;
+begin
+  ExecHidden(ExpandConstant('{sys}\taskkill.exe'), '/IM "' + ImageName + '" /T /F', ResultCode);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  TryStopService();
+  WaitForServiceStopped();
+
+  KillProcess('Ser2Net.Tray.exe');
+  KillProcess('Ser2Net.Service.exe');
+  KillProcess('ser2net.exe');
+
+  Result := '';
+end;
 
 procedure EnvAddPath(Path: string);
 var

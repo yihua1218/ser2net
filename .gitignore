@@ -34,6 +34,8 @@ ser2net
 /_stage/
 /build-*/
 /dist/
+/windows/**/bin/
+/windows/**/obj/
 
 # IDE/user-local settings
 /.vscode/
