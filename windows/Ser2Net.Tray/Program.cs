@@ -1,13 +1,25 @@
 using System.Diagnostics;
+using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using System.Text;
 using Ser2Net.Windows.Core;
 
 namespace Ser2Net.Tray;
 
 internal static class Program
 {
+    private const string SingleInstanceMutexName = "Global\\Ser2Net.Tray.SingleInstance";
+
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        // A named mutex prevents duplicate tray/manager processes. Later launches notify the first process through a named pipe.
+        using var mutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var ownsMutex);
+        if (!ownsMutex) {
+            TrayApplicationContext.ForwardActivation(args);
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
         Application.Run(new TrayApplicationContext());
     }
@@ -15,11 +27,17 @@ internal static class Program
 
 internal sealed class TrayApplicationContext : ApplicationContext
 {
+    private const string ActivationPipeName = "Ser2Net.Tray.Activation";
+
     private readonly NotifyIcon _icon;
     private readonly Ser2NetPaths _paths = Ser2NetPaths.FromExecutable();
+    private readonly CancellationTokenSource _activationListenerCts = new();
+    private readonly SynchronizationContext _uiContext;
+    private ManagerForm? _managerForm;
 
     public TrayApplicationContext()
     {
+        _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _icon = new NotifyIcon
         {
             Text = "Ser2Net",
@@ -28,11 +46,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ContextMenuStrip = BuildMenu()
         };
         _icon.DoubleClick += (_, _) => ShowManager();
+        StartActivationListener();
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing) {
+            _activationListenerCts.Cancel();
+            _activationListenerCts.Dispose();
+            _managerForm?.Dispose();
             _icon.Visible = false;
             _icon.Dispose();
         }
@@ -60,17 +82,60 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
     private void ShowManager()
     {
-        using var form = new ManagerForm(_paths);
-        form.ShowDialog();
+        if (_managerForm is { IsDisposed: false }) {
+            _managerForm.FocusExistingWindow();
+            return;
+        }
+
+        _managerForm = new ManagerForm(_paths);
+        _managerForm.FormClosed += (_, _) => _managerForm = null;
+        _managerForm.Show();
+        _managerForm.FocusExistingWindow();
     }
 
     private void RunServiceCommand(string command) => ManagerForm.RunServiceCommand(_paths, command);
+
+    public static void ForwardActivation(string[] args)
+    {
+        try {
+            using var client = new NamedPipeClientStream(".", ActivationPipeName, PipeDirection.Out);
+            client.Connect(500);
+            using var writer = new StreamWriter(client, Encoding.UTF8) { AutoFlush = true };
+            writer.WriteLine(string.Join('\t', args));
+        }
+        catch {
+            // The first instance owns the mutex but may still be starting. Failing quietly keeps the second launch from opening a duplicate UI.
+        }
+    }
+
+    private void StartActivationListener()
+    {
+        _ = Task.Run(async () =>
+        {
+            while (!_activationListenerCts.IsCancellationRequested) {
+                try {
+                    using var server = new NamedPipeServerStream(ActivationPipeName, PipeDirection.In, 1, PipeTransmissionMode.Message, PipeOptions.Asynchronous);
+                    await server.WaitForConnectionAsync(_activationListenerCts.Token).ConfigureAwait(false);
+                    using var reader = new StreamReader(server, Encoding.UTF8);
+                    _ = await reader.ReadLineAsync(_activationListenerCts.Token).ConfigureAwait(false);
+                    _uiContext.Post(_ => ShowManager(), null);
+                }
+                catch (OperationCanceledException) {
+                    break;
+                }
+                catch {
+                    await Task.Delay(250, _activationListenerCts.Token).ConfigureAwait(false);
+                }
+            }
+        }, _activationListenerCts.Token);
+    }
 
     private static void OpenFolder(string path)
     {
         Directory.CreateDirectory(path);
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
+
 }
 
 internal sealed class ManagerForm : Form
@@ -78,10 +143,13 @@ internal sealed class ManagerForm : Form
     private readonly Ser2NetPaths _paths;
     private readonly DataGridView _devicesGrid = new();
     private readonly DataGridView _mappingsGrid = new();
+    private readonly Label _devicesEmptyState = new();
+    private readonly Label _mappingsEmptyState = new();
     private readonly StatusStrip _bottomStatus = new();
     private readonly ToolStripStatusLabel _serviceStatusText = new();
     private readonly ToolStripStatusLabel _mappingCountText = new();
     private readonly ToolStripStatusLabel _usbDeviceCountText = new();
+    private readonly ToolStripStatusLabel _operationStatusText = new();
     private readonly ToolStripStatusLabel _configPathText = new();
     private readonly Label _serviceState = new();
     private readonly Label _configState = new();
@@ -102,6 +170,14 @@ internal sealed class ManagerForm : Form
     private readonly TextBox _banner = new();
     private readonly TextBox _identityPreview = new();
     private readonly Button _addOrUpdate = new();
+    private readonly ErrorProvider _errors = new();
+    private ToolStripButton _refreshButton = null!;
+    private ToolStripButton _saveButton = null!;
+    private ToolStripButton _restartButton = null!;
+    private bool _isRefreshing;
+    private bool _isSaving;
+    private bool _isRestarting;
+    private bool _editorIsValid = true;
 
     private List<SerialDevice> _devices = [];
     private MappingFile _mappingFile = new();
@@ -112,14 +188,28 @@ internal sealed class ManagerForm : Form
     {
         _paths = paths;
         Text = "Ser2Net Manager";
-        MinimumSize = new Size(1120, 720);
-        Width = 1220;
-        Height = 780;
+        MinimumSize = new Size(1280, 720);
+        Width = 1440;
+        Height = 900;
         StartPosition = FormStartPosition.CenterScreen;
+        _errors.ContainerControl = this;
 
         BuildLayout();
         LoadMappings();
         RefreshAll();
+    }
+
+    public void FocusExistingWindow()
+    {
+        if (WindowState == FormWindowState.Minimized) {
+            WindowState = FormWindowState.Normal;
+        }
+
+        Show();
+        Activate();
+        BringToFront();
+        NativeMethods.ShowWindow(Handle, NativeMethods.SwRestore);
+        NativeMethods.SetForegroundWindow(Handle);
     }
 
     public static void RunServiceCommand(Ser2NetPaths paths, string command)
@@ -145,12 +235,15 @@ internal sealed class ManagerForm : Form
     private void BuildLayout()
     {
         var toolbar = new ToolStrip { Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden, Padding = new Padding(8, 4, 8, 4) };
-        toolbar.Items.Add(ToolButton("Refresh Devices", RefreshDevices));
-        toolbar.Items.Add(ToolButton("Save", SaveAndGenerate));
-        toolbar.Items.Add(ToolButton("Restart Service", SaveGenerateAndRestart));
+        _refreshButton = ToolButton("Refresh Devices", () => _ = RefreshDevicesAsync());
+        _saveButton = ToolButton("Save", () => _ = SaveAndGenerateAsync(showSuccess: true));
+        _restartButton = ToolButton("Restart Service", () => _ = SaveGenerateAndRestartAsync());
+        toolbar.Items.Add(_refreshButton);
+        toolbar.Items.Add(_saveButton);
+        toolbar.Items.Add(_restartButton);
         toolbar.Items.Add(new ToolStripSeparator());
         var tools = new ToolStripDropDownButton("Tools");
-        tools.DropDownItems.Add("Generate Config", null, (_, _) => SaveAndGenerate());
+        tools.DropDownItems.Add("Generate Config", null, (_, _) => _ = SaveAndGenerateAsync(showSuccess: true));
         tools.DropDownItems.Add("Open Config Folder", null, (_, _) => OpenFolder(_paths.EtcDirectory));
         tools.DropDownItems.Add("Open Logs", null, (_, _) => OpenFolder(_paths.LogDirectory));
         tools.DropDownItems.Add(new ToolStripSeparator());
@@ -169,9 +262,9 @@ internal sealed class ManagerForm : Form
             RowCount = 1,
             Padding = new Padding(8)
         };
-        workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 27));
-        workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 48));
-        workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+        workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        workspace.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
         workspace.Controls.Add(BuildDevicesPanel(), 0, 0);
         workspace.Controls.Add(BuildMappingsPanel(), 1, 0);
         workspace.Controls.Add(BuildServiceStatusPanel(), 2, 0);
@@ -189,7 +282,7 @@ internal sealed class ManagerForm : Form
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 42,
+            Height = 34,
             ColumnCount = 4,
             Padding = new Padding(8, 4, 8, 4),
             BackColor = SystemColors.ControlLight
@@ -210,7 +303,8 @@ internal sealed class ManagerForm : Form
                 Text = labels[i],
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleCenter,
-                BorderStyle = BorderStyle.FixedSingle,
+                BorderStyle = BorderStyle.None,
+                Padding = new Padding(6, 2, 6, 2),
                 BackColor = i == 0 ? Color.FromArgb(230, 245, 255) : SystemColors.Window,
                 ForeColor = SystemColors.ControlText
             };
@@ -228,6 +322,7 @@ internal sealed class ManagerForm : Form
         _serviceStatusText.Text = "Service: Unknown";
         _mappingCountText.Text = "Mappings: 0";
         _usbDeviceCountText.Text = "USB Devices: 0";
+        _operationStatusText.Text = "Ready";
         _configPathText.Text = $"Config: {_paths.GeneratedConfigPath}";
         _configPathText.Spring = true;
         _configPathText.TextAlign = ContentAlignment.MiddleLeft;
@@ -237,6 +332,8 @@ internal sealed class ManagerForm : Form
         _bottomStatus.Items.Add(_mappingCountText);
         _bottomStatus.Items.Add(new ToolStripStatusLabel { Text = "|" });
         _bottomStatus.Items.Add(_usbDeviceCountText);
+        _bottomStatus.Items.Add(new ToolStripStatusLabel { Text = "|" });
+        _bottomStatus.Items.Add(_operationStatusText);
         _bottomStatus.Items.Add(new ToolStripStatusLabel { Text = "|" });
         _bottomStatus.Items.Add(_configPathText);
     }
@@ -259,10 +356,14 @@ internal sealed class ManagerForm : Form
         _devicesGrid.Columns.Add("Usb", "VID/PID");
         _devicesGrid.Columns.Add("Serial", "Serial");
         _devicesGrid.Columns.Add("Location", "USB Location");
+        SetColumnWidths(_devicesGrid, ("Port", 64), ("Name", 180), ("Usb", 92), ("Serial", 120), ("Location", 240));
         _devicesGrid.SelectionChanged += (_, _) => SelectDeviceFromGrid();
         _devicesGrid.CellDoubleClick += (_, _) => MapSelectedDeviceByLocation();
         _devicesGrid.MouseDown += DevicesGridMouseDown;
 
+        ConfigureEmptyState(_devicesEmptyState, "No USB serial devices detected. Click Refresh Devices.");
+
+        panel.Controls.Add(_devicesEmptyState);
         panel.Controls.Add(_devicesGrid);
         panel.Controls.Add(hint);
         panel.Controls.Add(title);
@@ -275,7 +376,9 @@ internal sealed class ManagerForm : Form
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Horizontal,
-            SplitterDistance = 310,
+            SplitterDistance = 330,
+            Panel1MinSize = 220,
+            Panel2MinSize = 320,
             BorderStyle = BorderStyle.FixedSingle
         };
 
@@ -283,18 +386,18 @@ internal sealed class ManagerForm : Form
         var title = new Label { Dock = DockStyle.Top, Height = 30, Text = "Mapping Configuration Editor", Font = new Font(Font, FontStyle.Bold) };
         ConfigureGrid(_mappingsGrid);
         _mappingsGrid.Columns.Add("Status", "Status");
-        _mappingsGrid.Columns.Add("Device", "Device");
         _mappingsGrid.Columns.Add("Com", "COM");
-        _mappingsGrid.Columns.Add("SerialNumber", "Serial Number");
-        _mappingsGrid.Columns.Add("TcpPort", "TCP Port");
+        _mappingsGrid.Columns.Add("TcpPort", "TCP");
         _mappingsGrid.Columns.Add("Protocol", "Protocol");
         _mappingsGrid.Columns.Add("Enabled", "Enabled");
         _mappingsGrid.Columns.Add("Name", "Alias");
-        _mappingsGrid.Columns.Add("Serial", "Serial");
+        SetColumnWidths(_mappingsGrid, ("Status", 92), ("Com", 64), ("TcpPort", 72), ("Protocol", 86), ("Enabled", 72), ("Name", 180));
         _mappingsGrid.SelectionChanged += (_, _) => SelectMappingFromGrid();
         _mappingsGrid.AllowDrop = true;
         _mappingsGrid.DragEnter += MappingsGridDragEnter;
         _mappingsGrid.DragDrop += MappingsGridDragDrop;
+        ConfigureEmptyState(_mappingsEmptyState, "No mappings configured. Drag a USB device here or double-click a device.");
+        mappingsPanel.Controls.Add(_mappingsEmptyState);
         mappingsPanel.Controls.Add(_mappingsGrid);
         mappingsPanel.Controls.Add(title);
 
@@ -314,26 +417,28 @@ internal sealed class ManagerForm : Form
             RowCount = 8
         };
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 32));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 30));
 
         panel.Controls.Add(new Label { Text = "Active Service Status", Dock = DockStyle.Fill, Font = new Font(Font, FontStyle.Bold) }, 0, 0);
-        panel.Controls.Add(_serviceState, 0, 1);
-        panel.Controls.Add(_configState, 0, 2);
+        panel.Controls.Add(StatusCard("Service", _serviceState), 0, 1);
+        panel.Controls.Add(StatusCard("Mappings", _configState), 0, 2);
         panel.Controls.Add(new Label { Text = "Active endpoints", Dock = DockStyle.Fill, ForeColor = SystemColors.GrayText }, 0, 3);
 
         _activeEndpoints.Dock = DockStyle.Fill;
         _activeEndpoints.IntegralHeight = false;
+        _activeEndpoints.HorizontalScrollbar = true;
         panel.Controls.Add(_activeEndpoints, 0, 4);
 
         panel.Controls.Add(new Label { Text = "Warnings", Dock = DockStyle.Fill, ForeColor = SystemColors.GrayText }, 0, 5);
         _warnings.Dock = DockStyle.Fill;
         _warnings.IntegralHeight = false;
+        _warnings.HorizontalScrollbar = true;
         panel.Controls.Add(_warnings, 0, 6);
 
         _automationState.Dock = DockStyle.Fill;
@@ -355,17 +460,29 @@ internal sealed class ManagerForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(0, 4, 0, 0),
             ColumnCount = 4,
-            RowCount = 9
+            RowCount = 8
         };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         _matchMode.DropDownStyle = ComboBoxStyle.DropDownList;
         _matchMode.Items.AddRange(["usb-location", "usb-serial", "com-name"]);
         _matchMode.SelectedIndex = 0;
-        _matchMode.SelectedIndexChanged += (_, _) => UpdateIdentityPreview();
+        _matchMode.SelectedIndexChanged += (_, _) =>
+        {
+            UpdateIdentityPreview();
+            ValidateEditor();
+        };
 
         _protocol.DropDownStyle = ComboBoxStyle.DropDownList;
         _protocol.Items.AddRange(["telnet", "tcp"]);
@@ -394,12 +511,12 @@ internal sealed class ManagerForm : Form
 
         _banner.Multiline = true;
         _banner.ScrollBars = ScrollBars.Vertical;
-        _banner.Height = 64;
+        _banner.MinimumSize = new Size(0, 76);
 
         _identityPreview.Multiline = true;
         _identityPreview.ReadOnly = true;
         _identityPreview.ScrollBars = ScrollBars.Vertical;
-        _identityPreview.Height = 64;
+        _identityPreview.MinimumSize = new Size(0, 76);
 
         _validation.Dock = DockStyle.Fill;
         _validation.ForeColor = Color.DarkRed;
@@ -416,29 +533,35 @@ internal sealed class ManagerForm : Form
         _baud.ValueChanged += (_, _) => ValidateEditor();
         _protocol.SelectedIndexChanged += (_, _) => ValidateEditor();
         _serialSettings.TextChanged += (_, _) => ValidateEditor();
+        _enabled.CheckedChanged += (_, _) => ValidateEditor();
 
         AddRow(panel, 0, "Alias", _name, "Match by", _matchMode);
-        AddRow(panel, 1, "Listen IP", _listenAddress, "TCP Port", _tcpPort);
-        AddRow(panel, 2, "Max clients", _maxConnections, "Protocol", _protocol);
-        AddRow(panel, 3, "Baud", _baud, "Serial", _serialSettings);
-        AddRow(panel, 4, "", _enabled, "", new Label());
+        AddRow(panel, 1, "Listen IP", _listenAddress, "Protocol", _protocol);
+        AddRow(panel, 2, "TCP Port", _tcpPort, "Baud Rate", _baud);
+        AddRow(panel, 3, "Max Clients", _maxConnections, "Serial Format", _serialSettings);
+        AddRow(panel, 4, "", new Label(), "", _enabled);
         panel.Controls.Add(new Label { Text = "Banner", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 5);
-        panel.SetColumnSpan(_banner, 3);
         panel.Controls.Add(_banner, 1, 5);
+        panel.SetColumnSpan(_banner, 3);
         panel.Controls.Add(new Label { Text = "Selected identity", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 6);
-        panel.SetColumnSpan(_identityPreview, 3);
         panel.Controls.Add(_identityPreview, 1, 6);
+        panel.SetColumnSpan(_identityPreview, 3);
         panel.Controls.Add(new Label { Text = "Validation", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 7);
-        panel.SetColumnSpan(_validation, 3);
         panel.Controls.Add(_validation, 1, 7);
+        panel.SetColumnSpan(_validation, 3);
 
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 34,
+            FlowDirection = FlowDirection.LeftToRight,
+            Padding = new Padding(0, 4, 0, 0)
+        };
         buttons.Controls.Add(_addOrUpdate);
         buttons.Controls.Add(Button("Delete Mapping", DeleteSelectedMapping));
         buttons.Controls.Add(Button("Clear", ClearEditor));
-        panel.SetColumnSpan(buttons, 4);
-        panel.Controls.Add(buttons, 0, 8);
 
+        outer.Controls.Add(buttons);
         outer.Controls.Add(panel);
         outer.Controls.Add(title);
         return outer;
@@ -471,6 +594,26 @@ internal sealed class ManagerForm : Form
         return button;
     }
 
+    private static Control StatusCard(string title, Label value)
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(8, 4, 8, 4),
+            Margin = new Padding(0, 0, 0, 6),
+            BackColor = SystemColors.Window
+        };
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        panel.Controls.Add(new Label { Text = title, Dock = DockStyle.Fill, ForeColor = SystemColors.GrayText }, 0, 0);
+        value.Dock = DockStyle.Fill;
+        value.AutoEllipsis = true;
+        panel.Controls.Add(value, 0, 1);
+        return panel;
+    }
+
     private static void ConfigureGrid(DataGridView grid)
     {
         grid.Dock = DockStyle.Fill;
@@ -480,7 +623,33 @@ internal sealed class ManagerForm : Form
         grid.RowHeadersVisible = false;
         grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         grid.MultiSelect = false;
-        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+        grid.AllowUserToResizeColumns = true;
+        grid.BackgroundColor = SystemColors.Window;
+        grid.CellToolTipTextNeeded += (_, e) =>
+        {
+            if (e.RowIndex >= 0 && e.ColumnIndex >= 0 && e.RowIndex < grid.Rows.Count) {
+                e.ToolTipText = grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString();
+            }
+        };
+    }
+
+    private static void SetColumnWidths(DataGridView grid, params (string Name, int Width)[] widths)
+    {
+        foreach (var (name, width) in widths) {
+            if (grid.Columns.Contains(name)) {
+                grid.Columns[name].Width = width;
+            }
+        }
+    }
+
+    private static void ConfigureEmptyState(Label label, string text)
+    {
+        label.Dock = DockStyle.Fill;
+        label.Text = text;
+        label.TextAlign = ContentAlignment.MiddleCenter;
+        label.ForeColor = SystemColors.GrayText;
+        label.BackColor = SystemColors.Window;
     }
 
     private void RefreshAll()
@@ -505,6 +674,44 @@ internal sealed class ManagerForm : Form
             _devices = [];
         }
 
+        PopulateDeviceGrid();
+        RefreshMappings();
+        RefreshStatus();
+        ValidateEditor();
+    }
+
+    private async Task RefreshDevicesAsync()
+    {
+        if (_isRefreshing) {
+            return;
+        }
+
+        _isRefreshing = true;
+        SetOperationStatus("Refreshing devices...");
+        UpdateActionState();
+        try {
+            _devices = await Task.Run(() => SerialPortEnumerator.Enumerate().ToList()).ConfigureAwait(true);
+            PopulateDeviceGrid();
+            RefreshMappings();
+            RefreshStatus();
+            SetOperationStatus("Ready");
+        }
+        catch (Exception ex) {
+            _devices = [];
+            PopulateDeviceGrid();
+            SetOperationStatus("Refresh failed");
+            AddStatusWarning($"Device scan failed: {ex.Message}");
+            MessageBox.Show($"Device scan failed:\n{ex.Message}", "Ser2Net", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally {
+            _isRefreshing = false;
+            ValidateEditor();
+            UpdateActionState();
+        }
+    }
+
+    private void PopulateDeviceGrid()
+    {
         _devicesGrid.Rows.Clear();
         foreach (var device in _devices) {
             var row = _devicesGrid.Rows[_devicesGrid.Rows.Add(
@@ -515,9 +722,8 @@ internal sealed class ManagerForm : Form
                 device.LocationPath)];
             row.Tag = device;
         }
-
-        RefreshMappings();
-        RefreshStatus();
+        _devicesEmptyState.Visible = _devices.Count == 0;
+        _devicesGrid.Visible = _devices.Count > 0;
     }
 
     private void RefreshMappings()
@@ -530,17 +736,17 @@ internal sealed class ManagerForm : Form
             var status = GetMappingStatus(mapping, resolvedMapping);
             var row = _mappingsGrid.Rows[_mappingsGrid.Rows.Add(
                 status,
-                resolvedMapping is null ? DeviceNameFromMatch(mapping.Match) : DeviceDisplayName(resolvedMapping.Device),
                 resolvedMapping?.Device.PortName ?? "",
-                resolvedMapping?.Device.UsbSerial ?? mapping.Match.SerialNumber,
                 mapping.Tcp.Port,
                 mapping.Tcp.Mode,
                 mapping.Enabled ? "Yes" : "No",
-                mapping.Name,
-                $"{mapping.Serial.Baud}{mapping.Serial.Settings}")];
+                mapping.Name)];
             row.Tag = i;
+            row.Cells["Name"].ToolTipText = $"{mapping.Name} | {DeviceNameFromMatch(mapping.Match)} | {mapping.Serial.Baud}{mapping.Serial.Settings}";
             ApplyMappingStatusStyle(row, status);
         }
+        _mappingsEmptyState.Visible = _mappingFile.Mappings.Count == 0;
+        _mappingsGrid.Visible = _mappingFile.Mappings.Count > 0;
     }
 
     private void RefreshStatus()
@@ -570,7 +776,7 @@ internal sealed class ManagerForm : Form
             _warnings.Items.Add(warning);
         }
         if (_warnings.Items.Count == 0) {
-            _warnings.Items.Add("No warnings");
+            _warnings.Items.Add("No warnings.");
         }
 
         UpdateWorkflowState(resolvedCount);
@@ -597,6 +803,7 @@ internal sealed class ManagerForm : Form
         }
 
         _selectedMappingIndex = index;
+        _selectedDevice = null;
         var mapping = _mappingFile.Mappings[index];
         _name.Text = mapping.Name;
         _enabled.Checked = mapping.Enabled;
@@ -749,6 +956,8 @@ internal sealed class ManagerForm : Form
         _identityPreview.Clear();
         _validation.Text = "";
         _addOrUpdate.Text = "Add Mapping";
+        ClearFieldErrors();
+        ValidateEditor();
     }
 
     private void ClearAllMappings()
@@ -790,6 +999,79 @@ internal sealed class ManagerForm : Form
         RunServiceCommand(_paths, "restart");
     }
 
+    private async Task<bool> SaveAndGenerateAsync(bool showSuccess)
+    {
+        if (_isSaving) {
+            return false;
+        }
+
+        if (!ValidateEditor() || !ValidateAllMappings()) {
+            MessageBox.Show(_validation.Text, "Ser2Net", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        _isSaving = true;
+        SetOperationStatus("Saving configuration...");
+        UpdateActionState();
+        try {
+            var resolved = await Task.Run(() =>
+            {
+                MappingStore.Save(_paths.MappingFilePath, _mappingFile);
+                var latestDevices = SerialPortEnumerator.Enumerate();
+                var resolvedMappings = MappingResolver.Resolve(_mappingFile.Mappings, latestDevices);
+                Ser2NetConfigGenerator.WriteConfig(_paths.GeneratedConfigPath, resolvedMappings);
+                return resolvedMappings.Count;
+            }).ConfigureAwait(true);
+
+            RefreshDevices();
+            SetOperationStatus("Ready");
+            if (showSuccess) {
+                MessageBox.Show($"Generated config with {resolved} resolved mapping(s).", "Ser2Net");
+            }
+            return true;
+        }
+        catch (Exception ex) {
+            SetOperationStatus("Save failed");
+            AddStatusWarning($"Save failed: {ex.Message}");
+            MessageBox.Show($"Save failed:\n{ex.Message}", "Ser2Net", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+        finally {
+            _isSaving = false;
+            ValidateEditor();
+            UpdateActionState();
+        }
+    }
+
+    private async Task SaveGenerateAndRestartAsync()
+    {
+        if (_isRestarting) {
+            return;
+        }
+
+        if (!await SaveAndGenerateAsync(showSuccess: false).ConfigureAwait(true)) {
+            return;
+        }
+
+        _isRestarting = true;
+        SetOperationStatus("Restarting service...");
+        UpdateActionState();
+        try {
+            await Task.Run(() => RunServiceCommand(_paths, "restart")).ConfigureAwait(true);
+            SetOperationStatus("Restart requested");
+            RefreshStatus();
+        }
+        catch (Exception ex) {
+            SetOperationStatus("Restart failed");
+            AddStatusWarning($"Restart failed: {ex.Message}");
+            MessageBox.Show($"Restart failed:\n{ex.Message}", "Ser2Net", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally {
+            _isRestarting = false;
+            UpdateActionState();
+        }
+    }
+
     private void UpdateIdentityPreview(DeviceMatch? match = null)
     {
         if (match is not null) {
@@ -812,12 +1094,25 @@ internal sealed class ManagerForm : Form
         }
 
         var errors = new List<string>();
+        var hasPendingEditorInput = _selectedMappingIndex >= 0 || _selectedDevice is not null || !string.IsNullOrWhiteSpace(_name.Text);
         var alias = _name.Text.Trim();
+        ClearFieldErrors();
+
+        if (!hasPendingEditorInput) {
+            _validation.Text = "Ready.";
+            _validation.ForeColor = Color.DarkGreen;
+            _editorIsValid = true;
+            UpdateActionState();
+            return true;
+        }
+
         if (string.IsNullOrWhiteSpace(alias)) {
             errors.Add("Alias is required.");
+            _errors.SetError(_name, "Alias is required.");
         }
         else if (!alias.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.')) {
             errors.Add("Alias can only use letters, numbers, dash, underscore, or dot.");
+            _errors.SetError(_name, "Use letters, numbers, dash, underscore, or dot.");
         }
 
         var port = (int)_tcpPort.Value;
@@ -826,6 +1121,7 @@ internal sealed class ManagerForm : Form
             .FirstOrDefault(item => item.index != _selectedMappingIndex && item.mapping.Enabled && item.mapping.Tcp.Port == port);
         if (conflictingMapping is not null) {
             errors.Add($"TCP port {port} is already used by {conflictingMapping.mapping.Name}.");
+            _errors.SetError(_tcpPort, $"Port already used by {conflictingMapping.mapping.Name}.");
         }
 
         if (_selectedMappingIndex < 0 && _selectedDevice is null) {
@@ -836,38 +1132,54 @@ internal sealed class ManagerForm : Form
             var match = BuildMatch(_selectedDevice);
             if (match.Mode == "usb-location" && string.IsNullOrWhiteSpace(match.LocationPath)) {
                 errors.Add("USB location is unavailable; use USB serial or COM-name fallback.");
+                _errors.SetError(_matchMode, "USB location is unavailable for this device.");
             }
             if (match.Mode == "usb-serial" && string.IsNullOrWhiteSpace(match.SerialNumber)) {
                 errors.Add("USB serial number is unavailable; use USB location or COM-name fallback.");
+                _errors.SetError(_matchMode, "USB serial number is unavailable for this device.");
             }
         }
 
         _validation.Text = errors.Count == 0 ? "Ready." : string.Join(" ", errors);
         _validation.ForeColor = errors.Count == 0 ? Color.DarkGreen : Color.DarkRed;
-        return errors.Count == 0;
+        _editorIsValid = errors.Count == 0;
+        UpdateActionState();
+        return _editorIsValid;
     }
 
     private bool ValidateAllMappings()
     {
-        var errors = new List<string>();
-        var enabled = _mappingFile.Mappings.Where(m => m.Enabled).ToList();
-        foreach (var group in enabled.GroupBy(m => m.Tcp.Port).Where(g => g.Count() > 1)) {
-            errors.Add($"TCP port {group.Key} is used by: {string.Join(", ", group.Select(m => m.Name))}.");
-        }
-
-        foreach (var mapping in _mappingFile.Mappings) {
-            if (string.IsNullOrWhiteSpace(mapping.Name)) {
-                errors.Add("Every mapping must have an alias.");
-            }
-        }
-
+        var errors = GetMappingValidationErrors().ToList();
         if (errors.Count == 0) {
-            return ValidateEditor();
+            return true;
         }
 
         _validation.Text = string.Join(" ", errors);
         _validation.ForeColor = Color.DarkRed;
         return false;
+    }
+
+    private IEnumerable<string> GetMappingValidationErrors()
+    {
+        var enabled = _mappingFile.Mappings.Where(m => m.Enabled).ToList();
+        foreach (var group in enabled.GroupBy(m => m.Tcp.Port).Where(g => g.Count() > 1)) {
+            yield return $"TCP port {group.Key} is used by: {string.Join(", ", group.Select(m => m.Name))}.";
+        }
+
+        foreach (var mapping in _mappingFile.Mappings) {
+            if (string.IsNullOrWhiteSpace(mapping.Name)) {
+                yield return "Every mapping must have an alias.";
+            }
+            if (mapping.Tcp.Port is < 1 or > 65535) {
+                yield return $"{mapping.Name}: TCP port must be between 1 and 65535.";
+            }
+            if (mapping.Match.Mode == "usb-location" && string.IsNullOrWhiteSpace(mapping.Match.LocationPath)) {
+                yield return $"{mapping.Name}: USB Location matching requires a USB location.";
+            }
+            if (mapping.Match.Mode == "usb-serial" && string.IsNullOrWhiteSpace(mapping.Match.SerialNumber)) {
+                yield return $"{mapping.Name}: Serial matching requires a USB serial number.";
+            }
+        }
     }
 
     private IEnumerable<string> GetWarnings()
@@ -914,6 +1226,13 @@ internal sealed class ManagerForm : Form
 
     private void UpdateWorkflowState(int resolvedCount)
     {
+        var labels = new[]
+        {
+            "1  Detect Devices",
+            "2  Create Mapping",
+            "3  Save",
+            "4  Restart"
+        };
         var completed = new[]
         {
             _devices.Count > 0,
@@ -921,13 +1240,19 @@ internal sealed class ManagerForm : Form
             File.Exists(_paths.GeneratedConfigPath),
             GetServiceState().Contains("RUNNING", StringComparison.OrdinalIgnoreCase) && resolvedCount > 0
         };
+        var current = Array.IndexOf(completed, false);
+        if (current < 0) {
+            current = completed.Length - 1;
+        }
 
         for (var i = 0; i < _workflowSteps.Length; i++) {
             if (_workflowSteps[i] is null) {
                 continue;
             }
 
-            _workflowSteps[i].BackColor = completed[i] ? Color.FromArgb(226, 247, 232) : i == Array.IndexOf(completed, false) ? Color.FromArgb(230, 245, 255) : SystemColors.Window;
+            _workflowSteps[i].Text = completed[i] ? $"{labels[i]}  Done" : labels[i];
+            _workflowSteps[i].Font = i == current ? new Font(Font, FontStyle.Bold) : Font;
+            _workflowSteps[i].BackColor = completed[i] ? Color.FromArgb(226, 247, 232) : i == current ? Color.FromArgb(230, 245, 255) : SystemColors.Window;
         }
     }
 
@@ -1062,5 +1387,49 @@ internal sealed class ManagerForm : Form
     {
         Directory.CreateDirectory(path);
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+    }
+
+    private void SetOperationStatus(string text)
+    {
+        _operationStatusText.Text = text;
+    }
+
+    private void UpdateActionState()
+    {
+        if (_refreshButton is null || _saveButton is null || _restartButton is null) {
+            return;
+        }
+
+        var busy = _isRefreshing || _isSaving || _isRestarting;
+        _refreshButton.Enabled = !busy;
+        _saveButton.Enabled = !busy && _editorIsValid && !GetMappingValidationErrors().Any();
+        _restartButton.Enabled = !busy && File.Exists(_paths.GeneratedConfigPath);
+        _addOrUpdate.Enabled = !busy && _editorIsValid;
+    }
+
+    private void ClearFieldErrors()
+    {
+        _errors.SetError(_name, "");
+        _errors.SetError(_tcpPort, "");
+        _errors.SetError(_matchMode, "");
+    }
+
+    private void AddStatusWarning(string warning)
+    {
+        if (_warnings.Items.Count == 1 && _warnings.Items[0]?.ToString() == "No warnings.") {
+            _warnings.Items.Clear();
+        }
+        _warnings.Items.Add(warning);
+    }
+
+    private static class NativeMethods
+    {
+        public const int SwRestore = 9;
+
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     }
 }
