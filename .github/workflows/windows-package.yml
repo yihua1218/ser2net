@@ -61,39 +61,71 @@ jobs:
         shell: msys2 {0}
         run: bash scripts/build-windows-package.sh
 
-      - name: Publish Windows service and tray tools
+      - name: Prepare package variants
+        run: |
+          Remove-Item -Recurse -Force dist\Ser2Net-framework, dist\Ser2Net-runtime -ErrorAction SilentlyContinue
+          Copy-Item -Recurse dist\Ser2Net dist\Ser2Net-framework
+          Copy-Item -Recurse dist\Ser2Net dist\Ser2Net-runtime
+
+      - name: Publish Windows service and tray tools without .NET runtime
+        run: |
+          dotnet publish windows\Ser2Net.Service\Ser2Net.Service.csproj `
+            -c Release `
+            -p:Platform=x64 `
+            -r win-x64 `
+            --self-contained false `
+            -o dist\Ser2Net-framework\bin
+          dotnet publish windows\Ser2Net.Tray\Ser2Net.Tray.csproj `
+            -c Release `
+            -p:Platform=x64 `
+            -r win-x64 `
+            --self-contained false `
+            -o dist\Ser2Net-framework\bin
+          dist\Ser2Net-framework\bin\Ser2Net.Service.exe generate --root dist\Ser2Net-framework
+
+      - name: Publish Windows service and tray tools with .NET runtime
         run: |
           dotnet publish windows\Ser2Net.Service\Ser2Net.Service.csproj `
             -c Release `
             -p:Platform=x64 `
             -r win-x64 `
             --self-contained true `
-            -o dist\Ser2Net\bin
+            -o dist\Ser2Net-runtime\bin
           dotnet publish windows\Ser2Net.Tray\Ser2Net.Tray.csproj `
             -c Release `
             -p:Platform=x64 `
             -r win-x64 `
             --self-contained true `
-            -o dist\Ser2Net\bin
-          dist\Ser2Net\bin\Ser2Net.Service.exe generate --root dist\Ser2Net
+            -o dist\Ser2Net-runtime\bin
+          dist\Ser2Net-runtime\bin\Ser2Net.Service.exe generate --root dist\Ser2Net-runtime
 
-      - name: Validate portable folder
+      - name: Validate package variants
         run: |
-          $required = @(
-            "dist\Ser2Net\bin\ser2net.exe",
-            "dist\Ser2Net\bin\Ser2Net.Service.exe",
-            "dist\Ser2Net\bin\Ser2Net.Tray.exe",
-            "dist\Ser2Net\etc\ser2net\mappings.json",
-            "dist\Ser2Net\etc\ser2net\windows.yml",
-            "dist\Ser2Net\etc\ser2net\smoke-echo.yaml",
-            "dist\Ser2Net\docs\dll-inventory.txt"
-          )
-          foreach ($path in $required) {
-            if (-not (Test-Path $path)) {
-              throw "Required package file is missing: $path"
+          $variants = @("dist\Ser2Net-framework", "dist\Ser2Net-runtime")
+          foreach ($variant in $variants) {
+            $required = @(
+              "$variant\bin\ser2net.exe",
+              "$variant\bin\Ser2Net.Service.exe",
+              "$variant\bin\Ser2Net.Tray.exe",
+              "$variant\etc\ser2net\mappings.json",
+              "$variant\etc\ser2net\windows.yml",
+              "$variant\etc\ser2net\smoke-echo.yaml",
+              "$variant\docs\dll-inventory.txt"
+            )
+            foreach ($path in $required) {
+              if (-not (Test-Path $path)) {
+                throw "Required package file is missing: $path"
+              }
             }
           }
-          Get-ChildItem dist\Ser2Net -Recurse | Select-Object FullName, Length
+          if (Test-Path "dist\Ser2Net-framework\bin\coreclr.dll") {
+            throw "Framework-dependent package unexpectedly contains .NET runtime files."
+          }
+          if (-not (Test-Path "dist\Ser2Net-runtime\bin\coreclr.dll")) {
+            throw "Runtime package is missing bundled .NET runtime files."
+          }
+          Get-ChildItem dist\Ser2Net-framework -Recurse | Select-Object FullName, Length
+          Get-ChildItem dist\Ser2Net-runtime -Recurse | Select-Object FullName, Length
 
       - name: Read package version
         id: version
@@ -104,18 +136,24 @@ jobs:
           }
           "value=$($Matches.version)" >> $env:GITHUB_OUTPUT
 
-      - name: Build Inno Setup installer
+      - name: Build Inno Setup installers
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $iscc "/DMyAppVersion=${{ steps.version.outputs.value }}" ser2net.iss
+          $version = "${{ steps.version.outputs.value }}"
+          & $iscc "/DMyAppVersion=$version" "/DSourceDir=dist\Ser2Net-framework" "/DMyOutputBaseFilename=Ser2Net-$version-win64" ser2net.iss
+          & $iscc "/DMyAppVersion=$version" "/DSourceDir=dist\Ser2Net-runtime" "/DMyOutputBaseFilename=Ser2Net-$version-win64-runtime" ser2net.iss
 
-      - name: Build portable zip
+      - name: Build portable zips
         run: |
           $version = "${{ steps.version.outputs.value }}"
           New-Item -ItemType Directory -Force dist\installer | Out-Null
           Compress-Archive `
-            -Path dist\Ser2Net\* `
+            -Path dist\Ser2Net-framework\* `
             -DestinationPath "dist\installer\Ser2Net-$version-win64-portable.zip" `
+            -Force
+          Compress-Archive `
+            -Path dist\Ser2Net-runtime\* `
+            -DestinationPath "dist\installer\Ser2Net-$version-win64-runtime-portable.zip" `
             -Force
 
       - name: Upload Windows package artifacts
@@ -124,8 +162,10 @@ jobs:
           name: Ser2Net-${{ steps.version.outputs.value }}-win64
           path: |
             dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64.exe
+            dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64-runtime.exe
             dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64-portable.zip
-            dist/Ser2Net/docs/dll-inventory.txt
+            dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64-runtime-portable.zip
+            dist/Ser2Net-framework/docs/dll-inventory.txt
           if-no-files-found: error
 
       - name: Publish GitHub Release assets
@@ -134,4 +174,6 @@ jobs:
         with:
           files: |
             dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64.exe
+            dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64-runtime.exe
             dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64-portable.zip
+            dist/installer/Ser2Net-${{ steps.version.outputs.value }}-win64-runtime-portable.zip

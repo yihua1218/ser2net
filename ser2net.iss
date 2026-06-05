@@ -13,6 +13,9 @@
 #ifndef SourceDir
 #define SourceDir "dist\Ser2Net"
 #endif
+#ifndef MyOutputBaseFilename
+#define MyOutputBaseFilename "Ser2Net-" + MyAppVersion + "-win64"
+#endif
 
 [Setup]
 AppId={{20B100EC-E722-47F4-923A-34ECABC50215}
@@ -27,7 +30,7 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 PrivilegesRequired=admin
 OutputDir=dist\installer
-OutputBaseFilename=Ser2Net-{#MyAppVersion}-win64
+OutputBaseFilename={#MyOutputBaseFilename}
 SetupIconFile=windows\Ser2Net.Tray\Assets\Ser2Net.ico
 UninstallDisplayIcon={app}\bin\Ser2Net.Tray.exe
 Compression=lzma
