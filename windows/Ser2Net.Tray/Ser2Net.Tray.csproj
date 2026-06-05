@@ -7,6 +7,7 @@
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
     <AssemblyName>Ser2Net.Tray</AssemblyName>
+    <ApplicationIcon>Assets\Ser2Net.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Ser2Net.Windows.Core\Ser2Net.Windows.Core.csproj" />

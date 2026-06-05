@@ -25,6 +25,22 @@ internal static class Program
     }
 }
 
+internal static class AppIcons
+{
+    public static Icon CreateApplicationIcon()
+    {
+        var executablePath = Environment.ProcessPath ?? Application.ExecutablePath;
+        if (File.Exists(executablePath)) {
+            var icon = Icon.ExtractAssociatedIcon(executablePath);
+            if (icon is not null) {
+                return icon;
+            }
+        }
+
+        return (Icon)SystemIcons.Application.Clone();
+    }
+}
+
 internal sealed class TrayApplicationContext : ApplicationContext
 {
     private const string ActivationPipeName = "Ser2Net.Tray.Activation";
@@ -41,7 +57,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _icon = new NotifyIcon
         {
             Text = "Ser2Net",
-            Icon = SystemIcons.Application,
+            Icon = AppIcons.CreateApplicationIcon(),
             Visible = true,
             ContextMenuStrip = BuildMenu()
         };
@@ -167,9 +183,14 @@ internal sealed class ManagerForm : Form
     private readonly NumericUpDown _baud = new();
     private readonly ComboBox _serialSettings = new();
     private readonly CheckBox _enabled = new();
+    private readonly CheckBox _serialLocal = new();
+    private readonly CheckBox _serialNoBreak = new();
+    private readonly CheckBox _serialRtsCts = new();
     private readonly TextBox _banner = new();
     private readonly TextBox _identityPreview = new();
     private readonly Button _addOrUpdate = new();
+    private readonly Button _deleteMapping = new();
+    private readonly Button _deleteMappingFromList = new();
     private readonly ErrorProvider _errors = new();
     private ToolStripButton _refreshButton = null!;
     private ToolStripButton _saveButton = null!;
@@ -188,6 +209,7 @@ internal sealed class ManagerForm : Form
     {
         _paths = paths;
         Text = "Ser2Net Manager";
+        Icon = AppIcons.CreateApplicationIcon();
         MinimumSize = new Size(1280, 720);
         Width = 1440;
         Height = 900;
@@ -372,18 +394,34 @@ internal sealed class ManagerForm : Form
 
     private Control BuildMappingsPanel()
     {
-        var panel = new SplitContainer
+        var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Orientation = Orientation.Horizontal,
-            SplitterDistance = 330,
-            Panel1MinSize = 220,
-            Panel2MinSize = 320,
+            ColumnCount = 1,
+            RowCount = 2,
             BorderStyle = BorderStyle.FixedSingle
         };
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 56));
 
         var mappingsPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(6) };
-        var title = new Label { Dock = DockStyle.Top, Height = 30, Text = "Mapping Configuration Editor", Font = new Font(Font, FontStyle.Bold) };
+        var header = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 34,
+            ColumnCount = 2,
+            RowCount = 1
+        };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Mapping Configuration Editor", TextAlign = ContentAlignment.MiddleLeft, Font = new Font(Font, FontStyle.Bold) }, 0, 0);
+
+        _deleteMappingFromList.Text = "Delete Selected";
+        _deleteMappingFromList.AutoSize = true;
+        _deleteMappingFromList.Enabled = false;
+        _deleteMappingFromList.Click += (_, _) => DeleteSelectedMapping();
+        header.Controls.Add(_deleteMappingFromList, 1, 0);
+
         ConfigureGrid(_mappingsGrid);
         _mappingsGrid.Columns.Add("Status", "Status");
         _mappingsGrid.Columns.Add("Com", "COM");
@@ -393,16 +431,19 @@ internal sealed class ManagerForm : Form
         _mappingsGrid.Columns.Add("Name", "Alias");
         SetColumnWidths(_mappingsGrid, ("Status", 92), ("Com", 64), ("TcpPort", 72), ("Protocol", 86), ("Enabled", 72), ("Name", 180));
         _mappingsGrid.SelectionChanged += (_, _) => SelectMappingFromGrid();
+        _mappingsGrid.KeyDown += MappingsGridKeyDown;
+        _mappingsGrid.MouseDown += MappingsGridMouseDown;
+        _mappingsGrid.ContextMenuStrip = BuildMappingsContextMenu();
         _mappingsGrid.AllowDrop = true;
         _mappingsGrid.DragEnter += MappingsGridDragEnter;
         _mappingsGrid.DragDrop += MappingsGridDragDrop;
         ConfigureEmptyState(_mappingsEmptyState, "No mappings configured. Drag a USB device here or double-click a device.");
         mappingsPanel.Controls.Add(_mappingsEmptyState);
         mappingsPanel.Controls.Add(_mappingsGrid);
-        mappingsPanel.Controls.Add(title);
+        mappingsPanel.Controls.Add(header);
 
-        panel.Panel1.Controls.Add(mappingsPanel);
-        panel.Panel2.Controls.Add(BuildEditorPanel());
+        panel.Controls.Add(mappingsPanel, 0, 0);
+        panel.Controls.Add(BuildEditorPanel(), 0, 1);
         return panel;
     }
 
@@ -455,9 +496,16 @@ internal sealed class ManagerForm : Form
     {
         var outer = new Panel { Dock = DockStyle.Fill, Padding = new Padding(6) };
         var title = new Label { Dock = DockStyle.Top, Height = 28, Text = "Selected Mapping", Font = new Font(Font, FontStyle.Bold) };
-        var panel = new TableLayoutPanel
+        var scroller = new Panel
         {
             Dock = DockStyle.Fill,
+            AutoScroll = true
+        };
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Padding = new Padding(0, 4, 0, 0),
             ColumnCount = 4,
             RowCount = 8
@@ -470,10 +518,10 @@ internal sealed class ManagerForm : Form
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
-        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
 
         _matchMode.DropDownStyle = ComboBoxStyle.DropDownList;
         _matchMode.Items.AddRange(["usb-location", "usb-serial", "com-name"]);
@@ -509,14 +557,20 @@ internal sealed class ManagerForm : Form
         _enabled.Text = "Enabled";
         _enabled.Checked = true;
 
+        ConfigureSerialOption(_serialLocal, "local");
+        ConfigureSerialOption(_serialNoBreak, "nobreak");
+        ConfigureSerialOption(_serialRtsCts, "rtscts");
+
         _banner.Multiline = true;
         _banner.ScrollBars = ScrollBars.Vertical;
-        _banner.MinimumSize = new Size(0, 76);
+        _banner.Dock = DockStyle.Fill;
+        _banner.MinimumSize = new Size(0, 96);
 
         _identityPreview.Multiline = true;
         _identityPreview.ReadOnly = true;
         _identityPreview.ScrollBars = ScrollBars.Vertical;
-        _identityPreview.MinimumSize = new Size(0, 76);
+        _identityPreview.Dock = DockStyle.Fill;
+        _identityPreview.MinimumSize = new Size(0, 96);
 
         _validation.Dock = DockStyle.Fill;
         _validation.ForeColor = Color.DarkRed;
@@ -526,6 +580,11 @@ internal sealed class ManagerForm : Form
         _addOrUpdate.AutoSize = true;
         _addOrUpdate.Click += (_, _) => AddOrUpdateMapping();
 
+        _deleteMapping.Text = "Delete Mapping";
+        _deleteMapping.AutoSize = true;
+        _deleteMapping.Enabled = false;
+        _deleteMapping.Click += (_, _) => DeleteSelectedMapping();
+
         _name.TextChanged += (_, _) => ValidateEditor();
         _listenAddress.TextChanged += (_, _) => ValidateEditor();
         _tcpPort.ValueChanged += (_, _) => ValidateEditor();
@@ -534,12 +593,15 @@ internal sealed class ManagerForm : Form
         _protocol.SelectedIndexChanged += (_, _) => ValidateEditor();
         _serialSettings.TextChanged += (_, _) => ValidateEditor();
         _enabled.CheckedChanged += (_, _) => ValidateEditor();
+        _serialLocal.CheckedChanged += (_, _) => ValidateEditor();
+        _serialNoBreak.CheckedChanged += (_, _) => ValidateEditor();
+        _serialRtsCts.CheckedChanged += (_, _) => ValidateEditor();
 
         AddRow(panel, 0, "Alias", _name, "Match by", _matchMode);
         AddRow(panel, 1, "Listen IP", _listenAddress, "Protocol", _protocol);
         AddRow(panel, 2, "TCP Port", _tcpPort, "Baud Rate", _baud);
         AddRow(panel, 3, "Max Clients", _maxConnections, "Serial Format", _serialSettings);
-        AddRow(panel, 4, "", new Label(), "", _enabled);
+        AddRow(panel, 4, "Serial Options", BuildSerialOptionsPanel(), "", _enabled);
         panel.Controls.Add(new Label { Text = "Banner", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 5);
         panel.Controls.Add(_banner, 1, 5);
         panel.SetColumnSpan(_banner, 3);
@@ -558,11 +620,12 @@ internal sealed class ManagerForm : Form
             Padding = new Padding(0, 4, 0, 0)
         };
         buttons.Controls.Add(_addOrUpdate);
-        buttons.Controls.Add(Button("Delete Mapping", DeleteSelectedMapping));
+        buttons.Controls.Add(_deleteMapping);
         buttons.Controls.Add(Button("Clear", ClearEditor));
 
+        scroller.Controls.Add(panel);
         outer.Controls.Add(buttons);
-        outer.Controls.Add(panel);
+        outer.Controls.Add(scroller);
         outer.Controls.Add(title);
         return outer;
     }
@@ -575,6 +638,29 @@ internal sealed class ManagerForm : Form
         panel.Controls.Add(control2, 3, row);
         control1.Dock = DockStyle.Fill;
         control2.Dock = DockStyle.Fill;
+    }
+
+    private static void ConfigureSerialOption(CheckBox checkBox, string text)
+    {
+        checkBox.Text = text;
+        checkBox.AutoSize = true;
+        checkBox.Margin = new Padding(0, 4, 12, 0);
+    }
+
+    private Control BuildSerialOptionsPanel()
+    {
+        var panel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            AutoScroll = true,
+            Margin = Padding.Empty
+        };
+        panel.Controls.Add(_serialLocal);
+        panel.Controls.Add(_serialNoBreak);
+        panel.Controls.Add(_serialRtsCts);
+        return panel;
     }
 
     private static Button Button(string text, Action action)
@@ -592,6 +678,19 @@ internal sealed class ManagerForm : Form
         };
         button.Click += (_, _) => action();
         return button;
+    }
+
+    private ContextMenuStrip BuildMappingsContextMenu()
+    {
+        var menu = new ContextMenuStrip();
+        var delete = menu.Items.Add("Delete Selected Mapping");
+        delete.Click += (_, _) => DeleteSelectedMapping();
+        menu.Opening += (_, e) =>
+        {
+            delete.Enabled = HasSelectedMapping();
+            e.Cancel = !HasSelectedMapping();
+        };
+        return menu;
     }
 
     private static Control StatusCard(string title, Label value)
@@ -799,6 +898,7 @@ internal sealed class ManagerForm : Form
     private void SelectMappingFromGrid()
     {
         if (_mappingsGrid.SelectedRows.Count == 0 || _mappingsGrid.SelectedRows[0].Tag is not int index || index < 0 || index >= _mappingFile.Mappings.Count) {
+            UpdateActionState();
             return;
         }
 
@@ -814,10 +914,12 @@ internal sealed class ManagerForm : Form
         _maxConnections.Value = Math.Clamp(mapping.Tcp.MaxConnections, 1, 1000);
         _baud.Value = Math.Clamp(mapping.Serial.Baud, 300, 4000000);
         _serialSettings.Text = mapping.Serial.Settings;
+        SetSerialOptions(mapping.Serial.Options);
         _banner.Text = mapping.Banner;
         _addOrUpdate.Text = "Update Mapping";
         UpdateIdentityPreview(mapping.Match);
         ValidateEditor();
+        UpdateActionState();
     }
 
     private void MapSelectedDeviceByLocation()
@@ -848,6 +950,7 @@ internal sealed class ManagerForm : Form
         _maxConnections.Value = 10;
         _baud.Value = 115200;
         _serialSettings.Text = "N81";
+        SetSerialOptions([]);
         _banner.Text = "";
     }
 
@@ -881,7 +984,8 @@ internal sealed class ManagerForm : Form
         mapping.Serial = new SerialSettings
         {
             Baud = (int)_baud.Value,
-            Settings = string.IsNullOrWhiteSpace(_serialSettings.Text) ? "N81" : _serialSettings.Text.Trim().ToUpperInvariant()
+            Settings = string.IsNullOrWhiteSpace(_serialSettings.Text) ? "N81" : _serialSettings.Text.Trim().ToUpperInvariant(),
+            Options = SelectedSerialOptions()
         };
         mapping.Banner = _banner.Text.Trim();
 
@@ -925,9 +1029,46 @@ internal sealed class ManagerForm : Form
         };
     }
 
+    private string[] SelectedSerialOptions()
+    {
+        var options = new List<string>();
+        if (_serialLocal.Checked) {
+            options.Add("local");
+        }
+        if (_serialNoBreak.Checked) {
+            options.Add("nobreak");
+        }
+        if (_serialRtsCts.Checked) {
+            options.Add("rtscts");
+        }
+        return options.ToArray();
+    }
+
+    private void SetSerialOptions(IEnumerable<string> options)
+    {
+        var normalized = options
+            .Where(option => !string.IsNullOrWhiteSpace(option))
+            .Select(option => option.Trim().ToLowerInvariant())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _serialLocal.Checked = normalized.Contains("local");
+        _serialNoBreak.Checked = normalized.Contains("nobreak");
+        _serialRtsCts.Checked = normalized.Contains("rtscts");
+    }
+
     private void DeleteSelectedMapping()
     {
         if (_selectedMappingIndex < 0 || _selectedMappingIndex >= _mappingFile.Mappings.Count) {
+            return;
+        }
+
+        var mapping = _mappingFile.Mappings[_selectedMappingIndex];
+        var result = MessageBox.Show(
+            $"Delete mapping \"{mapping.Name}\"?\n\nTCP {mapping.Tcp.Port} / {mapping.Tcp.Mode}",
+            "Delete Mapping",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (result != DialogResult.Yes) {
             return;
         }
 
@@ -951,6 +1092,7 @@ internal sealed class ManagerForm : Form
         _maxConnections.Value = 10;
         _baud.Value = 115200;
         _serialSettings.Text = "N81";
+        SetSerialOptions([]);
         _enabled.Checked = true;
         _banner.Clear();
         _identityPreview.Clear();
@@ -1287,6 +1429,36 @@ internal sealed class ManagerForm : Form
         MapSelectedDeviceByLocation();
     }
 
+    private void MappingsGridKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.Delete || !HasSelectedMapping()) {
+            return;
+        }
+
+        e.Handled = true;
+        DeleteSelectedMapping();
+    }
+
+    private void MappingsGridMouseDown(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right) {
+            return;
+        }
+
+        var hit = _mappingsGrid.HitTest(e.X, e.Y);
+        if (hit.RowIndex < 0) {
+            return;
+        }
+
+        _mappingsGrid.ClearSelection();
+        _mappingsGrid.Rows[hit.RowIndex].Selected = true;
+        _mappingsGrid.CurrentCell = _mappingsGrid.Rows[hit.RowIndex].Cells[Math.Max(0, hit.ColumnIndex)];
+        SelectMappingFromGrid();
+    }
+
+    private bool HasSelectedMapping() =>
+        _selectedMappingIndex >= 0 && _selectedMappingIndex < _mappingFile.Mappings.Count;
+
     private int NextTcpPort()
     {
         var used = _mappingFile.Mappings.Select(m => m.Tcp.Port).ToHashSet();
@@ -1405,6 +1577,8 @@ internal sealed class ManagerForm : Form
         _saveButton.Enabled = !busy && _editorIsValid && !GetMappingValidationErrors().Any();
         _restartButton.Enabled = !busy && File.Exists(_paths.GeneratedConfigPath);
         _addOrUpdate.Enabled = !busy && _editorIsValid;
+        _deleteMapping.Enabled = !busy && HasSelectedMapping();
+        _deleteMappingFromList.Enabled = !busy && HasSelectedMapping();
     }
 
     private void ClearFieldErrors()

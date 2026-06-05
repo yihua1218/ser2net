@@ -54,7 +54,7 @@ public static class Ser2NetConfigGenerator
     private static string BuildConnector(string portName, SerialSettings settings)
     {
         var suffix = $"{settings.Baud}{settings.Settings}".ToUpperInvariant();
-        var options = settings.Options.Length == 0 ? "" : "," + string.Join(",", settings.Options);
+        var options = settings.Options.Length == 0 ? "" : " " + string.Join(" ", settings.Options);
         return $"serialdev,{portName},{suffix}{options}";
     }
 
