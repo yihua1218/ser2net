@@ -67,17 +67,33 @@ jobs:
           Copy-Item -Recurse dist\Ser2Net dist\Ser2Net-framework
           Copy-Item -Recurse dist\Ser2Net dist\Ser2Net-runtime
 
+      - name: Read package version
+        id: version
+        run: |
+          $configure = Get-Content configure.ac -Raw
+          if ($configure -notmatch 'AC_INIT\(\[ser2net\],\[(?<version>[^\]]+)\]') {
+            throw "Unable to read ser2net version from configure.ac"
+          }
+          "value=$($Matches.version)" >> $env:GITHUB_OUTPUT
+
       - name: Publish Windows service and tray tools without .NET runtime
         run: |
+          $version = "${{ steps.version.outputs.value }}"
           dotnet publish windows\Ser2Net.Service\Ser2Net.Service.csproj `
             -c Release `
             -p:Platform=x64 `
+            -p:Version=$version `
+            -p:FileVersion=$version `
+            -p:AssemblyVersion=$version `
             -r win-x64 `
             --self-contained false `
             -o dist\Ser2Net-framework\bin
           dotnet publish windows\Ser2Net.Tray\Ser2Net.Tray.csproj `
             -c Release `
             -p:Platform=x64 `
+            -p:Version=$version `
+            -p:FileVersion=$version `
+            -p:AssemblyVersion=$version `
             -r win-x64 `
             --self-contained false `
             -o dist\Ser2Net-framework\bin
@@ -85,15 +101,22 @@ jobs:
 
       - name: Publish Windows service and tray tools with .NET runtime
         run: |
+          $version = "${{ steps.version.outputs.value }}"
           dotnet publish windows\Ser2Net.Service\Ser2Net.Service.csproj `
             -c Release `
             -p:Platform=x64 `
+            -p:Version=$version `
+            -p:FileVersion=$version `
+            -p:AssemblyVersion=$version `
             -r win-x64 `
             --self-contained true `
             -o dist\Ser2Net-runtime\bin
           dotnet publish windows\Ser2Net.Tray\Ser2Net.Tray.csproj `
             -c Release `
             -p:Platform=x64 `
+            -p:Version=$version `
+            -p:FileVersion=$version `
+            -p:AssemblyVersion=$version `
             -r win-x64 `
             --self-contained true `
             -o dist\Ser2Net-runtime\bin
@@ -126,15 +149,6 @@ jobs:
           }
           Get-ChildItem dist\Ser2Net-framework -Recurse | Select-Object FullName, Length
           Get-ChildItem dist\Ser2Net-runtime -Recurse | Select-Object FullName, Length
-
-      - name: Read package version
-        id: version
-        run: |
-          $configure = Get-Content configure.ac -Raw
-          if ($configure -notmatch 'AC_INIT\(\[ser2net\],\[(?<version>[^\]]+)\]') {
-            throw "Unable to read ser2net version from configure.ac"
-          }
-          "value=$($Matches.version)" >> $env:GITHUB_OUTPUT
 
       - name: Build Inno Setup installers
         run: |

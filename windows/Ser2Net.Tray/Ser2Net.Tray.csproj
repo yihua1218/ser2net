@@ -7,6 +7,10 @@
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
     <AssemblyName>Ser2Net.Tray</AssemblyName>
+    <Product>Ser2Net</Product>
+    <Company>Ser2Net</Company>
+    <Description>Ser2Net Windows Manager</Description>
+    <Copyright>Copyright (c) Ser2Net contributors</Copyright>
     <ApplicationIcon>Assets\Ser2Net.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>

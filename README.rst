@@ -336,3 +336,13 @@ Where gensio is already installed there, and then do::
 
 You can then use the Inno Setup Compiler to compile ser2net into an
 executable installer using the ser2net.iss file.
+
+Windows package documentation is available in
+docs/github-actions-windows-package.md.
+
+Code signing policy
+===================
+
+Windows release artifacts use the project code signing policy documented in
+docs/code-signing-policy.md. Free code signing is intended to be provided by
+SignPath.io, certificate by SignPath Foundation, after project approval.

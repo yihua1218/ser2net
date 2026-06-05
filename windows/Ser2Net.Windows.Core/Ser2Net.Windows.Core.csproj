@@ -4,5 +4,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
+    <Product>Ser2Net</Product>
+    <Company>Ser2Net</Company>
+    <Description>Ser2Net Windows Core Library</Description>
+    <Copyright>Copyright (c) Ser2Net contributors</Copyright>
   </PropertyGroup>
 </Project>
